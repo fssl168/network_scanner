@@ -38,6 +38,6 @@ The graphical interface (`lan_scanner_gui.py`) provides visual controls matching
 - Export buttons for CSV generation
 
 ### Example
-- You can use `python3 lan_scanner.py' to directly launch the graphical interface.
+- You can use `python3 lan_scanner_gui.py' to directly launch the graphical interface.
   
 The tool's architecture allows extension with additional network protocols and device fingerprinting capabilities.
