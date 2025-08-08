@@ -17,7 +17,6 @@ from db_manager import DatabaseManager
 from db_manager import save_results_to_db
 
 import asyncio
-import threading
 
 
 class LanScannerGUI:
@@ -782,20 +781,37 @@ class LanScannerGUI:
             self.add_status(f"删除失败: {str(e)}")
 
     def refresh_list(self, online_hosts=None):
-        """刷新资产列表"""
+        """刷新资产列表，包含已登记和未登记资产"""
         # 清除现有结果
         self.clear_results()
         
-        # 从数据库获取所有资产
-        all_assets = self.db_manager.get_all_assets()
-        if not all_assets:
-            self.add_status("没有找到资产记录")
-            return
-        
-        # 获取所有扫描过的MAC地址
-        scanned_macs = self.db_manager.get_all_scanned_macs()
-        
-        # 处理每个资产并添加到表格
+        # 确保online_hosts是列表类型
+        if online_hosts is None:
+            online_hosts = []
+            # 如果没有提供在线主机列表，从数据库获取最新扫描结果
+            try:
+                # 直接查询数据库获取最新扫描结果
+                self.db_manager.cursor.execute("""
+                    SELECT ip_address, status FROM scan_results 
+                    WHERE scan_time = (SELECT MAX(scan_time) FROM scan_results)
+                """)
+                latest_scan = self.db_manager.cursor.fetchall()
+                if latest_scan:
+                    online_hosts = [{'ip': ip} for ip, status in latest_scan if status == 'online']
+            except Exception as e:
+                self.add_status(f"获取最新扫描结果失败: {str(e)}")
+
+        # 从数据库获取所有资产，确保返回列表而非None
+        all_assets = self.db_manager.get_all_assets() or []
+        # 获取所有扫描过的MAC地址，确保返回列表而非None
+        scanned_macs = self.db_manager.get_all_scanned_macs() or []
+
+        # 已登记资产的MAC集合
+        registered_macs = {asset[0] for asset in all_assets}
+        # 未登记但已扫描的MAC集合
+        unregistered_macs = [mac for mac in scanned_macs if mac not in registered_macs]
+
+        # 处理已登记资产
         for idx, asset in enumerate(all_assets, 1):
             mac_address = asset[0]
             user_name = asset[1] or ""
@@ -807,142 +823,42 @@ class LanScannerGUI:
             hostname = last_scan[2] if last_scan else "未知"
             ip_address = last_scan[3] if last_scan else "未知"
             
-            # 检查资产是否在线（是否在扫描记录中）
-            # 以IP是否存在作为在线判断标准
-            is_online = ip_address != "未知" and ip_address in [host['ip'] for host in online_hosts]
+            # 检查资产是否在线
+            is_online = False
+            if ip_address != "未知":
+                is_online = any(host.get('ip') == ip_address for host in online_hosts)
+
             status = "在线" if is_online else "离线"
             
             # 插入表格
             self.tree.insert("", tk.END, values=(
-                idx, status, hostname, ip_address, mac_address, user_name, department
+                idx, status, hostname, ip_address, mac_address, user_name, department, notes
             ))
         
-        self.add_status(f"已刷新 {len(all_assets)} 条资产记录")
+        # 处理未登记资产
+        for mac_address in unregistered_macs:
+            # 获取主机名和IP地址
+            last_scan = self.db_manager.get_last_scan_by_mac(mac_address)
+            hostname = last_scan[2] if last_scan else "未知"
+            ip_address = last_scan[3] if last_scan else "未知"
 
-    def update_results(self, online_hosts):
-        # 确保所有在线主机都有status字段
-        for host in online_hosts:
-            if 'status' not in host:
-                host['status'] = '在线'
-        self.clear_results()
-        if not online_hosts:
-            self.add_status("未发现在线主机。")
-            return
+            # 检查是否在线
+            is_online = False
+            if ip_address != "未知":
+                is_online = any(host.get('ip') == ip_address for host in online_hosts)
 
-        # 按主机名排序
-        online_hosts.sort(key=lambda x: (x['hostname'] == 'Unknown', x['hostname']))
+            status = "在线" if is_online else "离线"
+            # 未登记资产状态显示为"未登记"
+            status = "未登记"
 
-        # 获取所有资产信息和扫描过的MAC地址
-        all_assets = self.db_manager.get_all_assets()
-        all_assets_map = {asset[0]: asset for asset in all_assets}
-        all_scanned_macs = self.db_manager.get_all_scanned_macs()
-
-        # 合并在线设备、已登记资产和所有扫描过的MAC地址
-        online_macs = {host['mac'] for host in online_hosts}
-        asset_macs = set(all_assets_map.keys())
-        scanned_macs = set(all_scanned_macs)
-
-        # 添加离线的已登记资产
-        for asset_mac in asset_macs:
-            if asset_mac not in online_macs:
-                # 获取最后扫描记录
-                last_scan = self.db_manager.get_last_scan_by_mac(asset_mac)
-              # hostname = last_scan[2] if last_scan else 'Unknown'
-                ip = 'N/A'  # 离线设备不使用历史IP
-                online_hosts.append({
-                        'hostname': 'Offline',
-                        'ip': ip,
-                        'mac': asset_mac,
-                        'status': '离线'
-                    })
-                online_macs.add(asset_mac)
-
-        # 添加未登记的扫描过的资产
-        for scanned_mac in scanned_macs:
-            if scanned_mac not in online_macs and scanned_mac not in asset_macs:
-                last_scan = self.db_manager.get_last_scan_by_mac(scanned_mac)
-                # hostname = last_scan[2] if last_scan else 'Unregistered'
-                ip = 'N/A'  # 未登记设备不使用历史IP
-                online_hosts.append({
-                        'hostname': 'Unregistered',
-                        'ip': ip,
-                        'mac': scanned_mac,
-                        'status': '未登记'
-                    })
-                online_macs.add(scanned_mac)
-
-        # 按状态和主机名排序（在线 > 离线 > 未登记）
-        online_hosts.sort(key=lambda x: (
-            x['hostname'] == 'Unregistered', 
-            x['hostname'] == 'Offline', 
-            x['hostname'] == 'Unknown', 
-            x['hostname']
-        ))
-
-        # 存储扫描结果用于导出
-        self.scan_results = []
-        # 更新表格
-        for idx, host in enumerate(online_hosts, 1):
-            # 获取资产信息，默认为空字符串
-            asset = all_assets_map.get(host['mac'], [None, None, "", "", ""])
-            user_name = asset[1] or ""
-            department = asset[2] or ""
-            notes = asset[3] or ""
-            
-            # 确定主机状态
-            if host['hostname'] == 'Offline':
-                status = '离线'
-            elif host['hostname'] == 'Unregistered':
-                status = '未登记'
-            else:
-                status = '在线'
-            
+            # 插入表格（序号延续已登记资产）
             self.tree.insert("", tk.END, values=(
-                idx, 
-                status,
-                host['hostname'], 
-                host['ip'], 
-                host['mac'],
-                user_name,
-                department,
-                notes
+                len(all_assets) + unregistered_macs.index(mac_address) + 1,
+                status, hostname, ip_address, mac_address, "", "", ""
             ))
-            # 保存结果数据用于导出
-            self.scan_results.append({
-                '序号': idx,
-                '状态': status,
-                '主机名': host['hostname'],
-                'IP地址': host['ip'],
-                'MAC地址': host['mac'],
-                '使用人': user_name,
-                '部门': department,
-                '备注': notes
-            })
 
-        # 统计各类设备数量
-        # 基于IP存在性重新统计
-        online_count = sum(1 for host in online_hosts if host.get('ip') and host['ip'] != 'N/A' and host.get('status') != '未登记')
-        offline_count = sum(1 for host in online_hosts if (not host.get('ip') or host['ip'] == 'N/A') and host.get('status') != '未登记')
-        unregistered_count = sum(1 for host in online_hosts if host.get('status') == '未登记')
-        # 导出到CSV
-        if self.csv_var.get():
-            # 使用用户输入的文件路径
-            csv_file = self.csv_entry.get()
-            if csv_file:
-                try:
-                    with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-                        writer = csv.writer(f)
-                        # 获取所有资产信息用于CSV导出
-                        all_assets = self.db_manager.get_all_assets()
-                        asset_map = {asset[0]: asset for asset in all_assets}
-                        
-                        # 写入CSV表头，包含新增的状态、使用人、部门和备注列
-                        writer.writerow(['序号', '状态', '主机名', 'IP地址', 'MAC地址', '使用人', '部门', '备注'])
-                except Exception as e:
-                    self.add_status(f"导出CSV文件时出错: {e}")
-
-        # 最后更新状态信息
-        self.add_status(f"共显示 {len(online_hosts)} 台设备，其中在线 {online_count} 台，离线 {offline_count} 台，未登记 {unregistered_count} 台")
+        total_count = len(all_assets) + len(unregistered_macs)
+        self.add_status(f"已刷新 {total_count} 条记录（已登记: {len(all_assets)}, 未登记: {len(unregistered_macs)}）")
 
 
         if self.csv_var.get():
@@ -973,7 +889,7 @@ class LanScannerGUI:
             except Exception as db_e:
                 self.add_status(f"保存到数据库时出错: {db_e}")
             
-            self.root.after(0, lambda: self.update_results(online_hosts))
+            self.root.after(0, lambda: self.refresh_list(online_hosts))
         except Exception as e:
             self.add_status(f"扫描出错: {e}")
             self.root.after(0, lambda: self.stop_scan())
@@ -1105,6 +1021,55 @@ def main():
     except ImportError:
         print("错误: 缺少必要的依赖包 'tabulate'。")
         print("请运行: pip install tabulate")
+        exit(1)
+    try:
+        # 检查tkinter是否已安装
+        import tkinter as tk
+    except ImportError:
+        print("错误: 缺少必要的依赖包 'tkinter'。")
+        print("请运行: sudo apt install python3-tk")
+        exit(1)
+    try:
+        # 检查asyncio是否已安装
+        import asyncio
+    except ImportError:
+        print("错误: 缺少必要的依赖包 'asyncio'。")
+        print("请运行: pip install asyncio")
+        exit(1)
+    try:
+        # 检查threading是否已安装
+        import threading
+    except ImportError:
+        print("错误: 缺少必要的依赖包 'threading'。")
+        print("请运行: pip install threading")
+        exit(1)
+    try:
+        # 检查datetime是否已安装
+        import datetime
+    except ImportError:
+        print("错误: 缺少必要的依赖包 'datetime'。")
+        print("请运行: pip install datetime")
+        exit(1)
+    try:
+        # 检查time是否已安装
+        import time
+    except ImportError:
+        print("错误: 缺少必要的依赖包 'time'。")
+        print("请运行: pip install time")
+        exit(1)
+    try:
+        # 检查messagebox是否已安装
+        import tkinter.messagebox
+    except ImportError:
+        print("错误: 缺少必要的依赖包 'tkinter.messagebox'。")
+        print("请运行: pip install tkinter.messagebox")
+        exit(1)
+    try:
+        # 检查tkinter是否已安装
+        import tkinter as tk
+    except ImportError:
+        print("错误: 缺少必要的依赖包 'tkinter'。")
+        print("请运行: sudo apt install python3-tk")
         exit(1)
 
     root = tk.Tk()
