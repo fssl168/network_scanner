@@ -153,8 +153,26 @@ async def scan_ip(ip):
         return {'ip': str(ip), 'hostname': hostname, 'mac': mac}
     return None
 
+async def get_arp_table():
+    """获取系统ARP表"""
+    if platform.system().lower() == 'windows':
+        proc = await asyncio.create_subprocess_exec(
+            'arp', '-a',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            'arp', '-n',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+    stdout, _ = await proc.communicate()
+    return stdout.decode('utf-8', errors='ignore')
+
 async def scan_network(exclude_ips=None, network_range=None):
-    """扫描网络并返回在线主机列表(异步版)"""
+    """扫描网络并返回在线主机列表(结合ARP表和主动扫描)"""
     # 获取本地IP和网络范围
     local_ip = get_local_ip()
     if network_range:
@@ -166,43 +184,58 @@ async def scan_network(exclude_ips=None, network_range=None):
     else:
         network = get_network_range(local_ip)
 
-    # 排除网络地址和广播地址
-    hosts = list(network.hosts())
+    # 获取ARP表中的设备
+    arp_output = await get_arp_table()
+    arp_hosts = set()
 
-    # 排除指定的IP地址
+    # 解析ARP表输出
+    for line in arp_output.split('\n'):
+        if platform.system().lower() == 'windows':
+            match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+        else:
+            match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+        if match:
+            ip = match.group(1)
+            try:
+                ip_obj = ipaddress.IPv4Address(ip)
+                if ip_obj in network:
+                    arp_hosts.add(ip)
+            except ValueError:
+                continue
+
+    # 准备要扫描的所有主机
+    all_hosts = list(network.hosts())
     if exclude_ips:
         exclude_set = set(str(ip) for ip in exclude_ips)
-        hosts = [ip for ip in hosts if str(ip) not in exclude_set]
-        excluded_count = len(list(network.hosts())) - len(hosts)
-        if excluded_count > 0:
-            print(f"排除 {excluded_count} 个IP地址...")
+        all_hosts = [ip for ip in all_hosts if str(ip) not in exclude_set]
 
-    total_hosts = len(hosts)
-    print(f"总共扫描 {total_hosts} 个IP地址...")
-
-    # 使用线程池并发扫描
-    # 使用信号量限制并发数量
-    semaphore = asyncio.Semaphore(100)  # 限制并发数为50
+    # 优先扫描ARP表中的设备
     online_hosts = []
+    semaphore = asyncio.Semaphore(100)
 
-    async def limited_scan(ip):
+    async def process_host(ip):
         async with semaphore:
             try:
-                # 设置总超时时间为5秒
-                result = await asyncio.wait_for(scan_ip(ip), timeout=5.0)
-                if result:
-                    online_hosts.append(result)
-                    # 每完成10个或全部完成时显示进度
-                    if len(online_hosts) % 10 == 0 or len(online_hosts) == total_hosts:
-                        print(f"进度: {len(online_hosts)}/{total_hosts} ({len(online_hosts)/total_hosts*100:.1f}%)")
-            except (asyncio.TimeoutError, Exception) as e:
-                # 静默处理超时和其他错误
+                if await ping_host(str(ip)):
+                    hostname = await get_hostname(str(ip))
+                    mac = await get_mac_address(str(ip))
+                    return {'ip': str(ip), 'hostname': hostname, 'mac': mac}
+            except Exception:
                 pass
         return None
 
-    # 创建并运行所有扫描任务
-    tasks = [limited_scan(ip) for ip in hosts]
-    await asyncio.gather(*tasks)
+    # 先扫描ARP表中的设备
+    print("正在扫描ARP表中的设备...")
+    arp_tasks = [process_host(ipaddress.IPv4Address(ip)) for ip in arp_hosts if ip not in (exclude_ips or [])]
+    arp_results = await asyncio.gather(*arp_tasks)
+    online_hosts.extend([r for r in arp_results if r])
+
+    # 再扫描网络中的其他设备
+    print("正在扫描网络中的其他设备...")
+    other_hosts = [ip for ip in all_hosts if str(ip) not in arp_hosts]
+    other_tasks = [process_host(ip) for ip in other_hosts]
+    other_results = await asyncio.gather(*other_tasks)
+    online_hosts.extend([r for r in other_results if r])
 
     return online_hosts, local_ip, network
 
