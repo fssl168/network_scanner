@@ -336,6 +336,13 @@ if __name__ == "__main__":
         print("错误: 缺少必要的依赖包 'tabulate'。")
         print("请运行: pip install tabulate")
         exit(1)
+    try:
+        # 检查asyncio是否已安装
+        from asyncio import asyncio
+    except ImportError:
+        print("错误: 缺少必要的依赖包 'asyncio'。")
+        print("请运行: pip install asyncio")
+        exit(1)
 
     # 使用asyncio.run()来运行主函数
     asyncio.run(main())
