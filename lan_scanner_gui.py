@@ -967,7 +967,13 @@ class LanScannerGUI:
                 time.sleep(delta.total_seconds())
                 
                 if self.scanning:
-                    self.scan_network()
+                    # 创建新事件循环运行异步扫描
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(self.scan_network())
+                    finally:
+                        loop.close()
                     self.root.after(0, self.stop_scan)
             except Exception as e:
                 self.root.after(0, lambda: self.add_status(f"时间调度出错: {e}"))
